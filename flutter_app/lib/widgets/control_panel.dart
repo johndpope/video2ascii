@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/ascii_charsets.dart';
 import '../providers/video_provider.dart';
+import 'saved_videos_sheet.dart';
 
 class ControlPanel extends StatelessWidget {
   final VideoProvider provider;
@@ -13,6 +14,15 @@ class ControlPanel extends StatelessWidget {
     required this.onPickVideo,
     required this.onPickFromCamera,
   });
+
+  void _showSavedVideos(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => SavedVideosSheet(provider: provider),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,6 +64,14 @@ class ControlPanel extends StatelessWidget {
                     icon: Icons.camera_alt,
                     label: 'Camera',
                     onTap: onPickFromCamera,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _ControlButton(
+                    icon: Icons.folder_special,
+                    label: 'Saved',
+                    onTap: () => _showSavedVideos(context),
                   ),
                 ),
               ],
@@ -211,6 +229,75 @@ class ControlPanel extends StatelessWidget {
                 ),
               ],
             ),
+
+            // Cache controls
+            if (provider.hasVideo) ...[
+              const SizedBox(height: 16),
+              const Divider(color: Colors.white24),
+              const SizedBox(height: 8),
+
+              // Cache status
+              _CacheStatusRow(provider: provider),
+
+              const SizedBox(height: 8),
+
+              // Cache action buttons
+              Row(
+                children: [
+                  // Record button
+                  Expanded(
+                    child: _CacheButton(
+                      icon: provider.isRecording ? Icons.stop : Icons.fiber_manual_record,
+                      label: provider.isRecording ? 'Stop' : 'Record',
+                      color: provider.isRecording ? Colors.red : Colors.orange,
+                      onTap: () async {
+                        if (provider.isRecording) {
+                          await provider.stopRecording();
+                        } else {
+                          await provider.startRecording();
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Cached playback button
+                  Expanded(
+                    child: _CacheButton(
+                      icon: provider.playbackMode == PlaybackMode.cached
+                          ? Icons.videocam
+                          : Icons.speed,
+                      label: provider.playbackMode == PlaybackMode.cached
+                          ? 'Live'
+                          : 'Fast',
+                      color: provider.cacheAvailable || provider.hasCachedFrames
+                          ? const Color(0xFF00FF00)
+                          : Colors.grey,
+                      onTap: (provider.cacheAvailable || provider.hasCachedFrames)
+                          ? () async {
+                              if (provider.playbackMode == PlaybackMode.cached) {
+                                provider.playLive();
+                              } else {
+                                await provider.playCached();
+                              }
+                            }
+                          : null,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Delete cache button
+                  Expanded(
+                    child: _CacheButton(
+                      icon: Icons.delete_outline,
+                      label: 'Clear',
+                      color: provider.cacheAvailable ? Colors.red[300]! : Colors.grey,
+                      onTap: provider.cacheAvailable
+                          ? () => provider.deleteCache()
+                          : null,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -309,6 +396,106 @@ class _ToggleChip extends StatelessWidget {
       backgroundColor: Colors.white10,
       side: BorderSide(
         color: value ? const Color(0xFF00FF00) : Colors.transparent,
+      ),
+    );
+  }
+}
+
+class _CacheStatusRow extends StatelessWidget {
+  final VideoProvider provider;
+
+  const _CacheStatusRow({required this.provider});
+
+  @override
+  Widget build(BuildContext context) {
+    String statusText;
+    Color statusColor;
+    IconData statusIcon;
+
+    switch (provider.playbackMode) {
+      case PlaybackMode.recording:
+        statusText = 'Recording... ${provider.cachedFrameCount} frames (${provider.cacheMemoryUsage})';
+        statusColor = Colors.red;
+        statusIcon = Icons.fiber_manual_record;
+        break;
+      case PlaybackMode.cached:
+        statusText = 'Fast playback - ${provider.cachedFrameCount} frames';
+        statusColor = const Color(0xFF00FF00);
+        statusIcon = Icons.speed;
+        break;
+      case PlaybackMode.live:
+      default:
+        if (provider.cacheAvailable) {
+          statusText = 'Cache available (${provider.cacheMemoryUsage})';
+          statusColor = Colors.blue;
+          statusIcon = Icons.save;
+        } else if (provider.hasCachedFrames) {
+          statusText = '${provider.cachedFrameCount} frames in memory';
+          statusColor = Colors.orange;
+          statusIcon = Icons.memory;
+        } else {
+          statusText = 'No cache - tap Record to capture';
+          statusColor = Colors.white54;
+          statusIcon = Icons.info_outline;
+        }
+        break;
+    }
+
+    return Row(
+      children: [
+        Icon(statusIcon, color: statusColor, size: 16),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            statusText,
+            style: TextStyle(color: statusColor, fontSize: 12),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _CacheButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback? onTap;
+
+  const _CacheButton({
+    required this.icon,
+    required this.label,
+    required this.color,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isEnabled = onTap != null;
+    return Material(
+      color: color.withOpacity(isEnabled ? 0.2 : 0.1),
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: isEnabled ? color : Colors.grey, size: 20),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: TextStyle(
+                  color: isEnabled ? color : Colors.grey,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

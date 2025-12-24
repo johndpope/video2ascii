@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:video_player/video_player.dart';
 import '../core/ascii_charsets.dart';
+import '../core/ascii_frame_cache.dart';
 import '../core/ripple_effect.dart';
 import '../providers/video_provider.dart';
 
@@ -56,6 +57,10 @@ class _AsciiRendererState extends State<AsciiRenderer>
   Future<void> _captureFrame() async {
     if (_isCapturing) return;
     if (!widget.provider.hasVideo) return;
+
+    // Skip capture if playing from cache
+    if (widget.provider.playbackMode == PlaybackMode.cached) return;
+
     if (!widget.provider.isPlaying && _framePixels != null) return;
 
     final boundary = _videoKey.currentContext?.findRenderObject();
@@ -73,11 +78,23 @@ class _AsciiRendererState extends State<AsciiRenderer>
       );
 
       if (byteData != null && mounted) {
+        final pixels = byteData.buffer.asUint8List();
+
         setState(() {
-          _framePixels = byteData.buffer.asUint8List();
+          _framePixels = pixels;
           _frameWidth = image.width;
           _frameHeight = image.height;
         });
+
+        // Record frame if in recording mode
+        if (widget.provider.playbackMode == PlaybackMode.recording) {
+          widget.provider.recordFrame(
+            timestampMs: widget.provider.position.inMilliseconds,
+            pixels: pixels,
+            imageWidth: image.width,
+            imageHeight: image.height,
+          );
+        }
       }
 
       image.dispose();
@@ -146,6 +163,9 @@ class _AsciiRendererState extends State<AsciiRenderer>
                           brightness: widget.provider.brightness,
                           colored: widget.provider.colored,
                           rippleManager: widget.provider.rippleManager,
+                          // Cached playback support
+                          cachedFrame: widget.provider.getCachedFrame(),
+                          playbackMode: widget.provider.playbackMode,
                         ),
                         size: Size(constraints.maxWidth, constraints.maxHeight),
                       ),
@@ -171,6 +191,9 @@ class AsciiPainter extends CustomPainter {
   final double brightness;
   final bool colored;
   final RippleManager rippleManager;
+  // Cached playback support
+  final CompressedFrame? cachedFrame;
+  final PlaybackMode playbackMode;
 
   AsciiPainter({
     required this.framePixels,
@@ -182,16 +205,22 @@ class AsciiPainter extends CustomPainter {
     required this.brightness,
     required this.colored,
     required this.rippleManager,
+    this.cachedFrame,
+    this.playbackMode = PlaybackMode.live,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     if (videoSize.isEmpty) return;
 
-    final aspectRatio = videoSize.width / videoSize.height;
-    final numRows = max(1, (numColumns / aspectRatio / 2).round());
+    // Use cached frame dimensions if in cached mode
+    final useCached = playbackMode == PlaybackMode.cached && cachedFrame != null;
 
-    final cellWidth = size.width / numColumns;
+    final aspectRatio = videoSize.width / videoSize.height;
+    final effectiveNumColumns = useCached ? cachedFrame!.width : numColumns;
+    final numRows = useCached ? cachedFrame!.height : max(1, (numColumns / aspectRatio / 2).round());
+
+    final cellWidth = size.width / effectiveNumColumns;
     final cellHeight = size.height / numRows;
     final fontSize = min(cellWidth * 1.8, cellHeight * 0.9);
 
@@ -204,14 +233,24 @@ class AsciiPainter extends CustomPainter {
         frameHeight > 0;
 
     for (int row = 0; row < numRows; row++) {
-      for (int col = 0; col < numColumns; col++) {
-        final normalizedX = col / numColumns;
+      for (int col = 0; col < effectiveNumColumns; col++) {
+        final normalizedX = col / effectiveNumColumns;
         final normalizedY = row / numRows;
 
         double value;
         int r = 0, g = 255, b = 0; // Default green
+        String char;
 
-        if (hasFrameData) {
+        if (useCached) {
+          // FAST PATH: Render from compressed cache
+          final charIdx = cachedFrame!.getCharIndex(col, row);
+          final rgb = cachedFrame!.getRGB(col, row);
+          r = rgb.$1;
+          g = rgb.$2;
+          b = rgb.$3;
+          char = charList[charIdx.clamp(0, numChars - 1)];
+          value = charIdx / numChars; // Approximate for ripple
+        } else if (hasFrameData) {
           // Sample from actual frame data
           final sampleX = (normalizedX * frameWidth).round().clamp(0, frameWidth - 1);
           final sampleY = (normalizedY * frameHeight).round().clamp(0, frameHeight - 1);
@@ -227,6 +266,13 @@ class AsciiPainter extends CustomPainter {
           } else {
             value = 0.5;
           }
+
+          // Apply brightness multiplier
+          value = (value * brightness).clamp(0.0, 1.0);
+
+          // Map to character
+          final charIndex = (value * (numChars - 0.001)).floor().clamp(0, numChars - 1);
+          char = charList[charIndex];
         } else {
           // Fallback: animated pattern while loading
           final time = DateTime.now().millisecondsSinceEpoch / 1000.0;
@@ -234,22 +280,24 @@ class AsciiPainter extends CustomPainter {
               0.3 * sin(normalizedX * 10 + time * 2) *
                   cos(normalizedY * 8 + time * 1.5);
           value += 0.1 * sin(normalizedX * 50 + normalizedY * 50);
-        }
 
-        // Apply brightness multiplier
-        value = (value * brightness).clamp(0.0, 1.0);
+          // Apply brightness multiplier
+          value = (value * brightness).clamp(0.0, 1.0);
+
+          // Map to character
+          final charIndex = (value * (numChars - 0.001)).floor().clamp(0, numChars - 1);
+          char = charList[charIndex];
+        }
 
         // Get ripple intensity
         final rippleIntensity = rippleManager.getIntensityAt(normalizedX, normalizedY);
-        value = (value + rippleIntensity * 0.5).clamp(0.0, 1.0);
-
-        // Map to character
-        final charIndex = (value * (numChars - 0.001)).floor().clamp(0, numChars - 1);
-        final char = charList[charIndex];
+        if (!useCached) {
+          value = (value + rippleIntensity * 0.5).clamp(0.0, 1.0);
+        }
 
         // Determine color
         Color textColor;
-        if (colored && hasFrameData) {
+        if (colored && (hasFrameData || useCached)) {
           // Use actual video color
           textColor = Color.fromRGBO(r, g, b, 1.0);
           // Boost saturation slightly for visibility
